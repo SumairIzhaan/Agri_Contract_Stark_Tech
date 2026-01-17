@@ -1,18 +1,11 @@
 import React, { useEffect, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
 import { supabase } from '../supabaseClient'; // Ensure this path is correct
 import { useAuth } from '../Context/AuthContext';
-import { MapPin, Calendar, CheckCircle, XCircle, User, Loader2, Package, DollarSign, Leaf, Eye, LogOut } from 'lucide-react';
+import { MapPin, Calendar, CheckCircle, XCircle, User, Loader2, Package, DollarSign, Leaf, Eye } from 'lucide-react';
 import Toast from '../Components/Common/Toast';
 
 const BuyerDashboard = () => {
-    const { user, signOut } = useAuth();
-    const navigate = useNavigate();
-
-    const handleLogout = async () => {
-        await signOut();
-        navigate('/', { replace: true });
-    };
+    const { user } = useAuth();
     const [crops, setCrops] = useState([]);
     const [loading, setLoading] = useState(true);
     const [actionLoading, setActionLoading] = useState(null); // ID of crop being acted upon
@@ -45,14 +38,18 @@ const BuyerDashboard = () => {
             const enrichedCrops = await Promise.all(cropsData.map(async (crop) => {
                 const { data: farmerData } = await supabase
                     .from('profiles')
-                    .select('name, phone')
+                    .select('name, phone, village_city, district, state')
                     .eq('id', crop.farmer_id)
                     .single();
+
+                const locationParts = [farmerData?.village_city, farmerData?.district, farmerData?.state].filter(Boolean);
+                const profileLocation = locationParts.length > 0 ? locationParts.join(', ') : null;
 
                 return {
                     ...crop,
                     farmerName: farmerData?.name || 'Unknown Farmer',
                     farmerPhone: farmerData?.phone,
+                    farmerLocation: profileLocation
                 };
             }));
 
@@ -70,12 +67,24 @@ const BuyerDashboard = () => {
 
     useEffect(() => {
         fetchCrops();
+
+        const channel = supabase
+            .channel('public:crops')
+            .on('postgres_changes', { event: '*', schema: 'public', table: 'crops' }, () => {
+                fetchCrops();
+            })
+            .subscribe();
+
+        return () => {
+            supabase.removeChannel(channel);
+        };
     }, []);
 
     const [selectedImage, setSelectedImage] = useState(null);
 
     const handleAction = async (cropId, action) => {
         try {
+            console.log(`Starting ${action} action for crop ${cropId}`);
             setActionLoading(cropId);
             const status = action === 'accept' ? 'accepted' : 'rejected';
 
@@ -86,36 +95,99 @@ const BuyerDashboard = () => {
                 updatePayload.buyer_id = user.id;
             }
 
-            const { error } = await supabase
+            console.log("Updating crop status...", updatePayload);
+            const { error: updateError } = await supabase
                 .from('crops')
                 .update(updatePayload)
                 .eq('id', cropId);
 
-            if (error) throw error;
+            if (updateError) {
+                console.error("Crop update failed:", updateError);
+                throw updateError;
+            }
+            console.log("Crop update successful");
 
             // 2. If Accepted, Send Notification to Farmer
             if (action === 'accept') {
+                console.log('=== NOTIFICATION CREATION START ===');
                 // Find the crop to get farmer_id
                 const crop = crops.find(c => c.id === cropId);
+                console.log("✓ Found crop data:", { cropId: crop?.id, cropName: crop?.name, farmerId: crop?.farmer_id, price: crop?.price });
+
                 if (crop) {
-                    await supabase.from('notifications').insert([{
+                    console.log(`→ Inserting notification for farmer: ${crop.farmer_id}`);
+
+                    // Fetch buyer's profile data from profiles table
+                    console.log('→ Fetching buyer profile for user:', user.id);
+                    const { data: buyerProfile, error: profileError } = await supabase
+                        .from('profiles')
+                        .select('name, phone, village_city, district, state')
+                        .eq('id', user.id)
+                        .single();
+
+                    if (profileError) {
+                        console.warn("⚠ Could not fetch buyer profile:", profileError);
+                    } else {
+                        console.log("✓ Buyer profile fetched:", buyerProfile);
+                    }
+
+                    // Build location string from profile data
+                    const locationParts = [
+                        buyerProfile?.village_city,
+                        buyerProfile?.district,
+                        buyerProfile?.state
+                    ].filter(Boolean);
+                    const buyerLocation = locationParts.length > 0
+                        ? locationParts.join(', ')
+                        : 'Location not provided';
+
+                    // Use profile data if available, fallback to user_metadata
+                    const buyerName = buyerProfile?.name || user.user_metadata?.name || 'Valued Buyer';
+                    const buyerPhone = buyerProfile?.phone || user.user_metadata?.phone || user.phone || 'Not provided';
+                    console.log('✓ Buyer info:', { name: buyerName, phone: buyerPhone, location: buyerLocation });
+
+                    const notificationPayload = {
                         user_id: crop.farmer_id,
                         type: 'ORDER_ACCEPTED',
-                        message: `Buyer ${user.user_metadata?.name || 'Unknown'} accepted your request for ${crop.name}!`,
+                        title: 'New Buyer Interest',
+                        message: `Buyer ${buyerName} is interested in your ${crop.name}!`,
                         data: {
-                            buyerName: user.user_metadata?.name || 'Valued Buyer',
-                            buyerPhone: user.user_metadata?.phone || user.phone || 'N/A', // Assuming phone is in metadata or top level
-                            buyerLocation: user.user_metadata?.location || 'Location Hidden',
+                            buyerName: buyerName,
+                            buyerPhone: buyerPhone,
+                            buyerLocation: buyerLocation,
                             cropName: crop.name,
                             price: crop.price,
                             cropId: crop.id,
-                            buyerId: user.id // Added for deep linking
+                            buyerId: user.id
                         }
-                    }]);
+                    };
+                    console.log("→ Notification Payload:", JSON.stringify(notificationPayload, null, 2));
+
+                    const { data: notifData, error: notifError } = await supabase
+                        .from('notifications')
+                        .insert([notificationPayload])
+                        .select();
+
+                    if (notifError) {
+                        console.error("❌ Notification insert FAILED!");
+                        console.error("Error details:", notifError);
+                        console.error("Error message:", notifError.message);
+                        console.error("Error code:", notifError.code);
+                        console.error("Error hint:", notifError.hint);
+                        console.log('=== NOTIFICATION CREATION END (FAILED) ===');
+                        // Don't throw here, we still want to show success for the crop update
+                        showToast('Deal accepted, but notification failed to send', 'warning');
+                    } else {
+                        console.log("✅ Notification inserted successfully!");
+                        console.log("Inserted data:", notifData);
+                        console.log('=== NOTIFICATION CREATION END (SUCCESS) ===');
+                    }
+                } else {
+                    console.error("Could not find crop in local state to get farmer_id");
                 }
             }
 
-            showToast(action === 'accept' ? 'Deal Accepted!' : 'Offer Rejected', action === 'accept' ? 'success' : 'info');
+            showToast(action === 'accept' ? 'Deal Accepted!' : 'Offer rejected', action === 'accept' ? 'success' : 'info');
 
             // Remove from local list
             setCrops(prev => prev.filter(c => c.id !== cropId));
@@ -157,13 +229,7 @@ const BuyerDashboard = () => {
             )}
 
             <div className="max-w-7xl mx-auto">
-                <div className="mb-10 text-center relative">
-                    <button
-                        onClick={handleLogout}
-                        className="absolute right-0 top-0 bg-red-50 text-red-600 px-4 py-2 rounded-xl text-sm font-bold flex items-center gap-2 hover:bg-red-100 transition-colors"
-                    >
-                        <LogOut size={16} /> Logout
-                    </button>
+                <div className="mb-10 text-center">
                     <h1 className="text-3xl font-bold text-green-900">Marketplace Requests</h1>
                     <p className="text-green-700 mt-2">View and respond to crop selling offers from farmers.</p>
                 </div>
@@ -238,7 +304,7 @@ const BuyerDashboard = () => {
                                             <p className="text-sm font-bold text-gray-900">{crop.farmerName}</p>
                                             <div className="flex items-center gap-1 text-xs text-gray-500">
                                                 <MapPin size={12} />
-                                                <span>{crop.location || 'Unknown Location'}</span>
+                                                <span>{crop.farmerLocation || crop.location || 'Unknown Location'}</span>
                                             </div>
                                         </div>
                                         {/* Contact Indicator */}
@@ -266,7 +332,7 @@ const BuyerDashboard = () => {
                                         {actionLoading === crop.id ? <Loader2 className="animate-spin" size={18} /> : (
                                             <>
                                                 <CheckCircle size={18} />
-                                                Accept Deal
+                                                Interest In Deal
                                             </>
                                         )}
                                     </button>

@@ -1,21 +1,14 @@
 import React, { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../Context/AuthContext';
-import { User, Upload, Leaf, MapPin, Calendar, DollarSign, Package, LogOut } from 'lucide-react';
+import { User, Upload, Leaf, MapPin, Calendar, DollarSign, Package, Eye } from 'lucide-react';
 import Toast from '../Components/Common/Toast';
 import { supabase } from '../supabaseClient';
 import { downloadContract } from '../services/contractService';
 import { FileText } from 'lucide-react';
 
 const SellerDashboard = () => {
-    const { user, role, signOut } = useAuth();
-    const navigate = useNavigate();
+    const { user, role } = useAuth();
     const [loading, setLoading] = useState(false);
-
-    const handleLogout = async () => {
-        await signOut();
-        navigate('/', { replace: true });
-    };
     const [toast, setToast] = useState({ message: '', type: '', show: false });
     const [myCrops, setMyCrops] = useState([]);
 
@@ -92,22 +85,26 @@ const SellerDashboard = () => {
                 publicUrl = data.publicUrl;
             }
 
-            // 2. Construct crop data object
+            // 2. Construct crop data object with proper types
             const cropData = {
                 farmer_id: user.id,
                 name: formData.cropName,
                 type: formData.cropType,
-                quantity: formData.quantity,
+                quantity: parseFloat(formData.quantity) || 0, // Ensure number
                 unit: formData.unit,
-                price: formData.expectedPrice,
-                harvest_date: formData.harvestDate || null,
-                location: formData.location || null,
-                image_url: publicUrl
+                price: parseFloat(formData.expectedPrice) || 0, // Ensure number
+                harvest_date: formData.harvestDate ? formData.harvestDate : null,
+                location: formData.location ? formData.location : null,
+                image_url: publicUrl,
+                status: 'pending'
             };
 
             const { error } = await supabase.from('crops').insert([cropData]);
 
-            if (error) throw error;
+            if (error) {
+                console.error("Supabase Insert Error:", JSON.stringify(error, null, 2)); // Detailed log
+                throw error;
+            }
 
             showToast('Crop listed successfully!', 'success');
 
@@ -185,21 +182,58 @@ const SellerDashboard = () => {
 
     const handleDownloadContract = async (crop) => {
         try {
+            if (!crop.buyer_id) {
+                showToast('No buyer found for this crop', 'error');
+                return;
+            }
+
+            setLoading(true);
+
+            // Fetch Buyer Details
+            const { data: buyerData, error: buyerError } = await supabase
+                .from('profiles')
+                .select('*')
+                .eq('id', crop.buyer_id)
+                .single();
+
+            if (buyerError || !buyerData) throw new Error("Failed to fetch buyer details");
+
+            // Construct payload matching backend expectation
             const contractDetails = {
-                farmerId: crop.farmer_id,
-                buyerId: crop.buyer_id, // Ensure this exists on the crop object
+                farmer: {
+                    name: user?.user_metadata?.name || 'Farmer',
+                    phone: user?.phone || 'N/A',
+                    village: user?.user_metadata?.village_city || '', // Assuming these might return null if not in metadata, ideally fetch full profile
+                    district: user?.user_metadata?.district || '',
+                    state: user?.user_metadata?.state || ''
+                },
+                buyer: {
+                    name: buyerData.name || 'Buyer',
+                    phone: buyerData.phone || 'N/A',
+                    village: buyerData.village_city || '',
+                    district: buyerData.district || '',
+                    state: buyerData.state || ''
+                },
+                crop: {
+                    name: crop.name
+                },
                 deal: {
-                    cropName: crop.name,
+                    contractId: `CNT-${Date.now()}`,
                     quantity: crop.quantity,
-                    price: crop.price,
-                    date: new Date().toISOString()
+                    pricePerQuintal: crop.price,
+                    totalAmount: crop.quantity * crop.price,
+                    deliveryDate: 'Within 7 days',
+                    deliveryLocation: 'Farm Gate'
                 }
             };
+
             await downloadContract(contractDetails);
             showToast('Contract downloaded successfully!', 'success');
         } catch (error) {
             console.error('Download error:', error);
             showToast('Failed to download contract', 'error');
+        } finally {
+            setLoading(false);
         }
     };
 
@@ -236,13 +270,7 @@ const SellerDashboard = () => {
             <div className="max-w-4xl mx-auto space-y-8">
 
                 {/* 1. Heading Section */}
-                <div className="text-center mb-8 relative">
-                    <button
-                        onClick={handleLogout}
-                        className="absolute right-0 top-0 bg-red-50 text-red-600 px-4 py-2 rounded-xl text-sm font-bold flex items-center gap-2 hover:bg-red-100 transition-colors"
-                    >
-                        <LogOut size={16} /> Logout
-                    </button>
+                <div className="text-center mb-8">
                     <h1 className="text-3xl font-bold text-green-900">Seller Dashboard</h1>
                     <p className="text-green-700 mt-2">Manage your listings and contracts.</p>
                 </div>
@@ -300,8 +328,13 @@ const SellerDashboard = () => {
                                     </div>
                                 </div>
 
-                                <button type="submit" disabled={loading} className="w-full bg-green-600 text-white font-bold py-3 rounded-xl hover:bg-green-700 transition-colors">
-                                    {loading ? 'Posting...' : 'Post Sales'}
+                                <button
+                                    type="submit"
+                                    disabled={loading}
+                                    onClick={() => console.log("Post button clicked", formData)}
+                                    className="w-full bg-green-600 text-white font-bold py-3 rounded-xl hover:bg-green-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                                >
+                                    {loading ? 'Posting...' : 'Post Crop'}
                                 </button>
                             </form>
                         </div>
@@ -354,6 +387,16 @@ const SellerDashboard = () => {
                                                 >
                                                     <FileText size={16} /> Download Contract
                                                 </button>
+                                            )}
+                                            {crop.image_url && (
+                                                <a
+                                                    href={crop.image_url}
+                                                    target="_blank"
+                                                    rel="noopener noreferrer"
+                                                    className="w-full sm:w-auto flex items-center justify-center gap-2 bg-blue-50 text-blue-700 px-4 py-2 rounded-lg hover:bg-blue-100 transition-colors border border-blue-200 font-semibold text-sm"
+                                                >
+                                                    <Eye size={16} /> View Image
+                                                </a>
                                             )}
                                         </div>
                                     </div>

@@ -8,7 +8,7 @@ import Buyer from './pages/Buyer';
 import FarmerInfo from './Components/FarmerInfo/Farmer';
 import About from './Components/About/About';
 
-import Login from './pages/Login';
+import  from './pages/Login';
 
 function App() {
   return (

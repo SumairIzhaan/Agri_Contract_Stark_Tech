@@ -16,15 +16,16 @@ const NotificationList = ({ onClose }) => {
         if (user) {
             fetchNotifications();
             // Subscribe to new notifications
+            const channelName = `public:notifications:${user.id}`;
             const subscription = supabase
-                .channel('public:notifications')
+                .channel(channelName)
                 .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'notifications', filter: `user_id=eq.${user.id}` }, (payload) => {
                     setNotifications(prev => [payload.new, ...prev]);
                 })
                 .subscribe();
 
             return () => {
-                supabase.removeChannel(subscription);
+                supabase.removeChannel(subscription).catch(err => console.warn("Cleanup error:", err));
             };
         }
     }, [user]);

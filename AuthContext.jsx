@@ -8,27 +8,43 @@ export const AuthProvider = ({ children }) => {
     const [role, setRole] = useState(null)
     const [loading, setLoading] = useState(true)
 
+    // PER USER REQUEST: Prevent auto-login on refresh.
+    // We explicitly sign out on mount to ensure a fresh state every time the page loads.
     useEffect(() => {
+        // Check for existing session on initial load
         const checkSession = async () => {
-            const { data: { session } } = await supabase.auth.getSession()
-            if (session?.user) {
-                setUser(session.user)
-                await fetchRole(session.user.id)
+            try {
+                const { data: { session }, error } = await supabase.auth.getSession()
+                if (error) throw error
+
+                if (session?.user) {
+                    setUser(session.user)
+                    await fetchRole(session.user.id)
+                }
+            } catch (error) {
+                if (error.name === 'AbortError' || error.message?.includes('aborted')) {
+                    // Ignore abort errors
+                    return;
+                }
+                console.error("Error checking session:", error)
+            } finally {
+                setLoading(false)
             }
-            setLoading(false)
         }
 
         checkSession()
 
-        const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
-            if (event === 'SIGNED_IN' && session?.user) {
-                setUser(session.user)
-                await fetchRole(session.user.id)
-            } else if (event === 'SIGNED_OUT') {
-                setUser(null)
-                setRole(null)
-            }
-        })
+        const { data: { subscription } } =
+            supabase.auth.onAuthStateChange(async (event, session) => {
+                if (event === 'SIGNED_IN' && session?.user) {
+                    setUser(session.user)
+                    await fetchRole(session.user.id)
+                }
+                if (event === 'SIGNED_OUT') {
+                    setUser(null)
+                    setRole(null)
+                }
+            })
 
         return () => subscription.unsubscribe()
     }, [])
@@ -40,8 +56,10 @@ export const AuthProvider = ({ children }) => {
                 .select('role')
                 .eq('id', userId)
                 .single()
-            setRole(data?.role || null)
-            return data?.role || null
+
+            const userRole = data?.role || null
+            setRole(userRole)
+            return userRole
         } catch {
             setRole(null)
             return null
@@ -49,37 +67,56 @@ export const AuthProvider = ({ children }) => {
     }
 
     const signUp = async ({ email, password, role, name, phone }) => {
-        const { data, error } = await supabase.auth.signUp({ email, password })
-        if (error) return { data: null, error }
+        try {
+            const { data, error } = await supabase.auth.signUp({
+                email,
+                password
+            })
 
-        await supabase.from('profiles').insert({
-            id: data.user.id,
-            role,
-            name,
-            phone,
-            email
-        })
-        return { data, error: null }
+            if (error) return { data: null, error }
+
+            await supabase.from('profiles').insert({
+                id: data.user.id,
+                role,
+                name,
+                phone,
+                email
+            })
+
+            return { data, error: null }
+        } catch (error) {
+            return { data: null, error }
+        }
     }
 
     const signIn = async ({ email, password }) => {
-        const { data, error } = await supabase.auth.signInWithPassword({ email, password })
-        if (error) return { data: null, error }
+        try {
+            const { data, error } = await supabase.auth.signInWithPassword({
+                email,
+                password
+            })
 
-        setUser(data.user)
-        const userRole = await fetchRole(data.user.id)
-        return { data, role: userRole, error: null }
+            if (error) return { data: null, error }
+
+            setUser(data.user)
+            const role = await fetchRole(data.user.id)
+
+            return { data, role, error: null }
+        } catch (error) {
+            return { data: null, error }
+        }
     }
 
     const signOut = async () => {
         try {
             await supabase.auth.signOut()
         } catch (error) {
-            console.error("Supabase signOut error:", error)
+            console.error("SignOut error:", error)
         } finally {
             setUser(null)
             setRole(null)
             localStorage.clear()
+            sessionStorage.clear()
         }
     }
 
